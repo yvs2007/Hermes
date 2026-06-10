@@ -1,4 +1,4 @@
-# Verity
+# Hermes
 
 A newspaper-style web app that synthesizes news from a curated whitelist of
 trusted outlets.
