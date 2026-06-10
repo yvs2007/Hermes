@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export function initSchema(db: Database.Database): void {
   const currentVersion = db.pragma("user_version", { simple: true }) as number;
@@ -8,10 +8,20 @@ export function initSchema(db: Database.Database): void {
 
   // Migration from v1 → v2: add market_impacts column
   if (currentVersion === 1) {
-    db.exec(`
-      ALTER TABLE compiled_stories ADD COLUMN market_impacts TEXT NOT NULL DEFAULT '[]';
-      PRAGMA user_version = ${SCHEMA_VERSION};
-    `);
+    db.exec(
+      `ALTER TABLE compiled_stories ADD COLUMN market_impacts TEXT NOT NULL DEFAULT '[]';`,
+    );
+    // fall through to v3 migration
+  }
+
+  // Migration v2 → v3: add `entities` JSON column on articles for the
+  // entity-overlap second-pass clustering. Backfilled lazily by the ingest
+  // pipeline (or in bulk via the backfill_entities CLI).
+  if (currentVersion <= 2) {
+    db.exec(
+      `ALTER TABLE articles ADD COLUMN entities TEXT NOT NULL DEFAULT '[]';`,
+    );
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
     return;
   }
 
@@ -46,6 +56,7 @@ export function initSchema(db: Database.Database): void {
       content_hash     TEXT NOT NULL,
       embedding        BLOB,
       topic_cluster_id TEXT,
+      entities         TEXT NOT NULL DEFAULT '[]',
       ingested_at      TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (source_domain) REFERENCES sources(domain),
       FOREIGN KEY (topic_cluster_id) REFERENCES topic_clusters(id)

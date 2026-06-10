@@ -81,6 +81,7 @@ export interface ArticleRow {
   content: string;
   content_hash: string;
   topic_cluster_id: string | null;
+  entities: string; // JSON-encoded string[]; parse at the call site.
   ingested_at: string;
 }
 
@@ -130,6 +131,60 @@ export function updateArticleEmbedding(id: string, embedding: number[]): void {
 export function updateArticleCluster(id: string, clusterId: string): void {
   const db = getDb();
   db.prepare("UPDATE articles SET topic_cluster_id = ? WHERE id = ?").run(clusterId, id);
+}
+
+export function setArticleEntities(id: string, entities: string[]): void {
+  const db = getDb();
+  db.prepare("UPDATE articles SET entities = ? WHERE id = ?").run(
+    JSON.stringify(entities),
+    id,
+  );
+}
+
+export function getArticleEntities(id: string): string[] {
+  const db = getDb();
+  const row = db.prepare("SELECT entities FROM articles WHERE id = ?").get(id) as
+    | { entities: string }
+    | undefined;
+  if (!row) return [];
+  try {
+    return JSON.parse(row.entities) as string[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Union of entities across all articles in a cluster. Used by the entity
+ * overlap second-pass when deciding whether to attach a new article.
+ */
+export function getClusterEntities(clusterId: string): string[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT entities FROM articles WHERE topic_cluster_id = ?")
+    .all(clusterId) as Array<{ entities: string }>;
+  const out = new Set<string>();
+  for (const r of rows) {
+    try {
+      for (const e of JSON.parse(r.entities) as string[]) out.add(e);
+    } catch {
+      // skip malformed rows
+    }
+  }
+  return Array.from(out);
+}
+
+/**
+ * Articles that have never had entity extraction run (entities = '[]').
+ * Used by the backfill_entities CLI.
+ */
+export function getArticlesMissingEntities(limit: number): ArticleRow[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM articles WHERE entities = '[]' ORDER BY ingested_at ASC LIMIT ?",
+    )
+    .all(limit) as ArticleRow[];
 }
 
 export function getArticleEmbedding(id: string): number[] | null {
@@ -241,6 +296,59 @@ export function getAllRecentClusterIds(sinceIso: string): ClusterRow[] {
   return db
     .prepare("SELECT * FROM topic_clusters WHERE last_updated_at >= ? ORDER BY last_updated_at DESC")
     .all(sinceIso) as ClusterRow[];
+}
+
+/**
+ * Clusters that have never been synthesized into a compiled_story.
+ *
+ * Ordered by article-count DESC so the multi-source clusters (which Plutus's
+ * coverage_breadth gate actually wants) get drained first. `minArticles`
+ * lets callers filter out single-article clusters that would never satisfy
+ * any reasonable strategy trigger.
+ */
+export function getUnsynthesizedClusters(
+  limit: number,
+  minArticles = 1,
+): ClusterRow[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT tc.*
+         FROM topic_clusters tc
+         LEFT JOIN compiled_stories cs ON cs.topic_cluster_id = tc.id
+        WHERE cs.id IS NULL
+        GROUP BY tc.id
+       HAVING (
+         SELECT count(*) FROM articles a
+          WHERE a.topic_cluster_id = tc.id
+       ) >= ?
+        ORDER BY (
+          SELECT count(*) FROM articles a
+           WHERE a.topic_cluster_id = tc.id
+        ) DESC,
+        tc.last_updated_at DESC
+        LIMIT ?`,
+    )
+    .all(minArticles, limit) as ClusterRow[];
+}
+
+export function countUnsynthesizedClusters(minArticles = 1): number {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT count(*) AS n FROM (
+         SELECT tc.id FROM topic_clusters tc
+         LEFT JOIN compiled_stories cs ON cs.topic_cluster_id = tc.id
+          WHERE cs.id IS NULL
+          GROUP BY tc.id
+         HAVING (
+           SELECT count(*) FROM articles a
+            WHERE a.topic_cluster_id = tc.id
+         ) >= ?
+       )`,
+    )
+    .get(minArticles) as { n: number };
+  return row.n;
 }
 
 // ---------------------------------------------------------------------------

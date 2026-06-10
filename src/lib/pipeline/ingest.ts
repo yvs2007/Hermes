@@ -83,7 +83,14 @@ export async function runIngest(): Promise<IngestStats> {
         try {
           const vec = await embed(`${item.title}\n\n${content.slice(0, 600)}`);
           updateArticleEmbedding(articleId, vec);
-          attachToCluster(articleId, vec, item.title);
+          // attachToCluster also extracts and persists entities so the
+          // entity-overlap second pass works on future articles.
+          attachToCluster(
+            articleId,
+            vec,
+            item.title,
+            `${item.title}\n\n${content.slice(0, 1500)}`,
+          );
         } catch (e) {
           stats.errors.push({
             url: item.link,
